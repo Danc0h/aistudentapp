@@ -164,7 +164,7 @@ app.post("/summarize/pdf", upload.single("file"), async (req, res) => {
     return data.text;
   });
 });
-
+//OPENAI_API_KEY =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
 /**
  * 📌 Handle DOCX Upload & AI Processing
  */
