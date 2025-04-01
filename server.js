@@ -5,194 +5,215 @@ import pdfParse from "pdf-parse";
 import mammoth from "mammoth";
 import axios from "axios";
 import cors from "cors";
-import fs from "fs/promises"; // ✅ Use fs/promises for async file operations
+import fs from "fs/promises";
 import path from "path";
-import mongoose from "mongoose";
-import Note from "./models/NotesModel.js";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
-
-// 🔹 Load environment variables
-const MONGO_URI = process.env.MONGODB_URI;
-const NLP_CLOUD_API_KEY = process.env.NLP_CLOUD_API_KEY;
-const PREP_AI_CLIENT_ID = process.env.PREP_AI_CLIENT_ID;
-const PREP_AI_CLIENT_SECRET = process.env.PREP_AI_CLIENT_SECRET;
-
-// 🔹 Connect to MongoDB
-mongoose
-  .connect(MONGO_URI)
-  .then(() => console.log("✅ Connected to MongoDB"))
-  .catch((err) => console.error("❌ MongoDB connection error:", err));
-
 app.use(express.json());
 app.use(cors());
 
-// 🔹 Set up file upload with multer
-const upload = multer({ dest: "uploads/" });
+// 🔹 Load DeepSeek API Key
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 
-/**
- * 📌 Function to Generate AI Summary Using NLP Cloud with Retry (Handles 429 Errors)
- */
+// Generate AI Summary Using DeepSeek (100 Words)
 const generateSummary = async (text) => {
-  const maxRetries = 3;
-  let attempt = 0;
-  while (attempt < maxRetries) {
-    try {
-      console.log(
-        "📤 Sending extracted text to NLP Cloud for summarization..."
-      );
-      const response = await axios.post(
-        "https://api.nlpcloud.io/v1/bart-large-cnn/summarization",
-        { text, min_length: 200, max_length: 500 },
-        {
-          headers: {
-            Authorization: `Token ${NLP_CLOUD_API_KEY}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-      console.log("🔍 NLP Cloud Summary Response:", response.data);
-      return response.data.summary || "Summary generation failed.";
-    } catch (error) {
-      if (error.response?.status === 429) {
-        console.warn(
-          `⚠️ Rate limit hit. Retrying in ${attempt + 1} seconds...`
-        );
-        await new Promise((resolve) =>
-          setTimeout(resolve, (attempt + 1) * 1000)
-        );
-        attempt++;
-      } else {
-        console.error("❌ NLP Cloud Summary Error:", error.message);
-        return "Error generating summary.";
-      }
-    }
-  }
-  return "Error: Exceeded max retries for summary.";
-};
-
-/**
- * 📌 Function to Generate AI Questions from Text Using PrepAI
- */
-const generateQuestionsFromText = async (text) => {
   try {
-    console.log(
-      "📤 Sending extracted text to PrepAI for question generation..."
-    );
-
-    const formData = new URLSearchParams();
-    formData.append("quizName", "Generated Quiz");
-    formData.append("content", text);
-    formData.append("quesType", "1,5"); // ✅ MCQs & Short Answer
-    formData.append("quesCount", "5"); // ✅ Request 5 questions
-    formData.append("visualOutput", "1");
+    console.log(" Sending extracted text to DeepSeek for summarization...");
 
     const response = await axios.post(
-      "https://api.prepai.io/generateQuestionsApi",
-      formData.toString(),
+      "https://api.deepseek.com/chat/completions",
+      {
+        model: "deepseek-chat",
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are an AI assistant that generates summaries with exactly 100 words.",
+          },
+          {
+            role: "user",
+            content: `Summarize the following text in exactly 100 words:
+            
+            Text: """${text}"""
+
+            **Output format:**
+            \`\`\`
+            <summary>Generated summary here...</summary>
+            \`\`\`
+            
+            **Rules:**
+            - Summary must be exactly 100 words.
+            - No extra text outside the summary.
+            - No bullet points or numbered lists.
+            `,
+          },
+        ],
+        stream: false,
+      },
       {
         headers: {
-          clientId: PREP_AI_CLIENT_ID,
-          clientSecret: PREP_AI_CLIENT_SECRET,
-          "Content-Type": "application/x-www-form-urlencoded",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
         },
       }
     );
 
-    console.log("🔍 PrepAI Question Response:", response.data);
+    // Extract the response text
+    const responseText = response.data.choices[0].message.content.trim();
 
-    if (!response.data.success || !response.data.response) {
-      return ["PrepAI did not return valid questions."];
+    // Extract summary from response
+    const summaryMatch = responseText.match(/<summary>([\s\S]*?)<\/summary>/);
+
+    if (!summaryMatch) {
+      throw new Error("DeepSeek response does not contain a summary.");
     }
 
-    return response.data.response.map((q) => q.question.join(" ")); // ✅ Convert to array of strings
+    console.log(" DeepSeek Summary Response:", summaryMatch[1]);
+    return summaryMatch[1];
   } catch (error) {
-    console.error("❌ PrepAI Text-Based Question Error:", error.message);
-    return ["Error generating questions from text."];
+    console.error(
+      " DeepSeek Summary Error:",
+      error.response?.data || error.message
+    );
+    return "Error generating summary.";
   }
 };
 
-/**
- * 📌 Common Function to Process File Uploads (PDF & DOCX)
- */
+//  Generate AI Questions Using DeepSeek (Short-Answer)
+const generateQuestionsFromText = async (text) => {
+  try {
+    console.log(
+      " Sending extracted text to DeepSeek for short-answer question generation..."
+    );
+
+    const response = await axios.post(
+      "https://api.deepseek.com/chat/completions",
+      {
+        model: "deepseek-chat",
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are an AI assistant that generates only short-answer quiz questions in JSON format.",
+          },
+          {
+            role: "user",
+            content: `Generate 10 short-answer quiz questions in strict JSON format based on the following text:
+            
+            Text: """${text}"""
+
+            **Output must be a valid JSON inside triple backticks like this:**
+            \`\`\`json
+            {
+              "questions": [
+                {"type": "short-answer", "question": "...", "answer": "..."},
+                {"type": "short-answer", "question": "...", "answer": "..."},
+                {"type": "short-answer", "question": "...", "answer": "..."}
+              ]
+            }
+            \`\`\`
+            
+            **Rules:**
+            - Only generate **short-answer** questions.
+            - Do **not** include multiple-choice or true/false questions.
+            - Output must strictly follow the JSON format above.
+            - Do **not** include any text outside the JSON block.
+            `,
+          },
+        ],
+        stream: false,
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
+        },
+      }
+    );
+
+    // Extract the response text
+    const responseText = response.data.choices[0].message.content.trim();
+
+    // Extract JSON block from response
+    const jsonMatch = responseText.match(/```json\n([\s\S]*?)\n```/);
+
+    if (!jsonMatch) {
+      throw new Error("DeepSeek response is not in JSON format.");
+    }
+
+    // Parse JSON
+    const output = JSON.parse(jsonMatch[1]);
+
+    console.log("🔍 DeepSeek Short-Answer Question Response:", output);
+    return output.questions;
+  } catch (error) {
+    console.error(" DeepSeek Error:", error.response?.data || error.message);
+    return ["Error generating short-answer questions from text."];
+  }
+};
+
+//  Process File (Handles PDF/DOCX Extraction & AI Processing)
 const processFile = async (req, res, extractTextFunc) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
     const filePath = path.resolve(req.file.path);
-    console.log(`📢 Processing File: ${req.file.originalname}`);
+    console.log(` Processing File: ${req.file.originalname}`);
 
-    // ✅ Extract text
     const text = await extractTextFunc(filePath);
+
+    //  Log the extracted text
+    console.log(" Extracted Text:", text);
+
     if (!text.trim()) {
       await fs.unlink(filePath);
       return res.status(400).json({ error: "Extracted text is empty." });
     }
 
-    // ✅ Generate AI Summary
-    const summary = await generateSummary(text);
+    const [summary, questions] = await Promise.all([
+      generateSummary(text),
+      generateQuestionsFromText(text),
+    ]);
 
-    // ✅ Generate AI Questions
-    const questions = await generateQuestionsFromText(text);
-
-    // ✅ Save to MongoDB
-    const newNote = new Note({
-      filename: req.file.originalname,
-      fileType: req.file.mimetype,
-      textContent: text,
-      summary,
-      generatedQuestions: questions,
-    });
-
-    await newNote.save();
-    await fs.unlink(filePath); // ✅ Delete file after processing
-
+    await fs.unlink(filePath); // Delete file after processing
     res.json({ summary, questions });
   } catch (error) {
-    console.error("❌ Error processing file:", error.message);
+    console.error(" Error processing file:", error.message);
     res.status(500).json({ error: "Failed to process file" });
   }
 };
 
-/**
- * 📌 Handle PDF Upload & AI Processing
- */
-app.post("/summarize/pdf", upload.single("file"), async (req, res) => {
-  processFile(req, res, async (filePath) => {
-    const dataBuffer = await fs.readFile(filePath);
-    const data = await pdfParse(dataBuffer);
-    return data.text;
-  });
-});
-//OPENAI_API_KEY =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
-/**
- * 📌 Handle DOCX Upload & AI Processing
- */
-app.post("/summarize/docx", upload.single("file"), async (req, res) => {
-  processFile(req, res, async (filePath) => {
-    const dataBuffer = await fs.readFile(filePath);
-    const { value: text } = await mammoth.extractRawText({
-      buffer: dataBuffer,
+//  Handle PDF Upload & AI Processing
+app.post(
+  "/summarize/pdf",
+  multer({ dest: "uploads/" }).single("file"),
+  async (req, res) => {
+    processFile(req, res, async (filePath) => {
+      const dataBuffer = await fs.readFile(filePath);
+      const data = await pdfParse(dataBuffer);
+      return data.text;
     });
-    return text;
-  });
-});
-
-/**
- * 📌 Fetch All Saved Notes
- */
-app.get("/notes", async (req, res) => {
-  try {
-    const notes = await Note.find().sort({ createdAt: -1 });
-    res.json(notes);
-  } catch (error) {
-    console.error("❌ Fetching notes error:", error.message);
-    res.status(500).json({ error: "Failed to fetch notes" });
   }
-});
+);
 
-/**
- * 📌 Start the Server
- */
+//  Handle DOCX Upload & AI Processing
+app.post(
+  "/summarize/docx",
+  multer({ dest: "uploads/" }).single("file"),
+  async (req, res) => {
+    processFile(req, res, async (filePath) => {
+      const dataBuffer = await fs.readFile(filePath);
+      const { value: text } = await mammoth.extractRawText({
+        buffer: dataBuffer,
+      });
+      return text;
+    });
+  }
+);
+
+// 🔹 Start the Server
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(` Server running on port ${PORT}`));
